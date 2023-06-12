@@ -1,6 +1,7 @@
 import path from 'path';
+// import generatePackageJson from 'rollup-plugin-generate-package-json';
 import { getBasePollupPlugins } from './utils';
-const pkgPath = (dir) => path.resolve(__dirname, '../../', dir);
+const pkgPath = (dir = '') => path.resolve(__dirname, '../../', dir);
 export default [
 	{
 		input: pkgPath('src/index.ts'),
@@ -9,6 +10,15 @@ export default [
 			name: 'index.js',
 			format: 'umd'
 		},
-		plugins: getBasePollupPlugins()
+		plugins: [
+			...getBasePollupPlugins()
+			// generatePackageJson({
+			// 	inputFolder: pkgPath(),
+			// 	outputFolder: pkgPath('dist/'),
+			// 	baseContents: (pkgJson) => ({
+			// 		...pkgJson
+			// 	})
+			// })
+		]
 	}
 ];

@@ -4,7 +4,7 @@ import ora from 'ora';
 import { red, green, blue, yellow } from 'chalk';
 import { dirname } from 'path';
 import { textSync } from 'figlet';
-import { prompt } from 'inquirer';
+import inquirer from 'inquirer';
 import {
 	DEPENDENCIES,
 	DEV_DEPENDENCIES,
@@ -154,7 +154,7 @@ export function askQuetions() {
 			message: `是否覆盖当前${blue('package.json')}`
 		}
 	];
-	return prompt(questions);
+	return inquirer.prompt(questions);
 }
 
 export async function oraTips(

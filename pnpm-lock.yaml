@@ -1,10 +1,5 @@
 lockfileVersion: '6.0'
 
-dependencies:
-  g:
-    specifier: ^2.0.1
-    version: registry.npmmirror.com/g@2.0.1
-
 devDependencies:
   '@commitlint/cli':
     specifier: ^17.6.5
@@ -1855,12 +1850,6 @@ packages:
     name: function-bind
     version: 1.1.1
     dev: true
-
-  registry.npmmirror.com/g@2.0.1:
-    resolution: {integrity: sha512-Fi6Ng5fZ/ANLQ15H11hCe+09sgUoNvDEBevVgx3KoYOhsH5iLNPn54hx0jPZ+3oSWr+xajnp2Qau9VmPsc7hTA==, registry: https://registry.npm.taobao.org/, tarball: https://registry.npmmirror.com/g/-/g-2.0.1.tgz}
-    name: g
-    version: 2.0.1
-    dev: false
 
   registry.npmmirror.com/get-caller-file@2.0.5:
     resolution: {integrity: sha512-DyFP3BM/3YHTQOCUL/w0OZHR0lpKeGrxotcHWcqNEdnltqFwXVfhEBQ94eIo34AfQpo0rGki4cyIiftY06h2Fg==, registry: https://registry.npm.taobao.org/, tarball: https://registry.npmmirror.com/get-caller-file/-/get-caller-file-2.0.5.tgz}
