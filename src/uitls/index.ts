@@ -126,10 +126,10 @@ export function handleNodeModulesReplace(path: string) {
 /**
  * 终端标题打印
  */
-export function logTips() {
+export function logTips(tips: string) {
 	console.log(
 		green(
-			textSync('nb batch script', {
+			textSync(tips, {
 				font: 'Ghost'
 			})
 		)
@@ -149,6 +149,21 @@ export function askQuetions() {
 			choices: ['js', 'ts']
 		},
 		{
+			type: 'list',
+			name: 'projectMode',
+			message: '请选择处理模式',
+			choices: [
+				{
+					name: '移动node_modules下nb文件到工程目录',
+					value: 'move'
+				},
+				{
+					name: '下载nb文件到工程目录',
+					value: 'download'
+				}
+			]
+		},
+		{
 			type: 'confirm',
 			name: 'pkgCover',
 			message: `是否覆盖当前${blue('package.json')}`
@@ -164,7 +179,7 @@ export async function oraTips(
 	},
 	option: ora.Options = {
 		//   text: "loading...",
-		prefixText: '模块下载中',
+		prefixText: '处理中',
 
 		color: 'yellow',
 		spinner: {

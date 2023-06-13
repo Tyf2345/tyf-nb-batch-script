@@ -6,8 +6,11 @@ import {
 	writeFileSync,
 	readFileSync,
 	existsSync,
-	remove
+	remove,
+	move
 } from 'fs-extra';
+import axios from 'axios';
+import compressing from 'compressing';
 import merge from 'lodash/merge';
 import {
 	random,
@@ -28,26 +31,33 @@ import {
 	DEPENDENCIES,
 	DEV_DEPENDENCIES,
 	PREFIX_NB,
-	NODE_MODULES
+	NODE_MODULES,
+	DEFAULT_EXCLUDE_MERGE_FILES
 } from './constants/index';
 import {
 	INbDependciesFileNameAndType,
 	INbDependciesFileName,
 	TProjectType
 } from './types';
+import { TNbDependciesType } from './types';
+import { TProjectMode } from './types';
 
-// async function downloadModule(targetDir, path, fileName) {
-//   const fileBuffer = await axios.get(path, {
-//     responseType: "arraybuffer",
-//   });
-//   const newTargetDir = `${targetDir}/${random()}`;
-//   dfsCreateDir(targetDir);
-//   await compressing.tgz.uncompress(fileBuffer.data, newTargetDir);
-//   console.log(chalk.blue(newTargetDir));
-//   await fs.move(`${newTargetDir}/package`, `${targetDir}/${fileName}`);
-//   await fs.remove(newTargetDir);
-//   return getPackageJSON(`${targetDir}/${fileName}`);
-// }
+async function downloadModule(
+	targetDir: string,
+	path: string,
+	fileName: string
+) {
+	const fileBuffer = await axios.get(path, {
+		responseType: 'arraybuffer'
+	});
+	const newTargetDir = `${targetDir}/${random()}`;
+	dfsCreateDir(targetDir);
+	await compressing.tgz.uncompress(fileBuffer.data, newTargetDir);
+	console.log(blue(`正在下载nb包: ${fileName} 至 ${targetDir}文件夹下`));
+	await move(`${newTargetDir}/package`, `${targetDir}/${fileName}`);
+	await remove(newTargetDir);
+	return getPackageJSON(`${targetDir}/${fileName}`);
+}
 
 async function moveModule(targetDir: string, fileName: string) {
 	const targetPath = `${targetDir}/${fileName}`;
@@ -75,11 +85,20 @@ async function arrangeRootPackageJson() {
 		`${getRootDir()}/package.json`,
 		JSON.stringify(packageJSON, null, 2)
 	);
+	console.log(red.bold('package.json整理完成'));
+}
+
+/**
+ * 处理模块
+ */
+async function handleModules(projectMode: TProjectMode) {
+	await moveRootModules(projectMode);
+	await moveDependciesModules(projectMode);
 }
 /**
  * 移动根目录package.json下的nb模块到 center-modules/[dependencies | devDependencies ]下
  */
-async function moveRootModules() {
+async function moveRootModules(projectMode: TProjectMode) {
 	const rootPackageJSON = getPackageJSON(`${getRootDir()}`);
 	const { dependencies = {}, devDependencies = {} } = rootPackageJSON;
 	const nbDependciesPath: INbDependciesFileName[] = [];
@@ -87,6 +106,8 @@ async function moveRootModules() {
 	for (const pkgName in dependencies) {
 		if (pkgName.startsWith(PREFIX_NB)) {
 			nbDependciesPath.push({
+				url: getPackageJSON(`${getRootDir()}/${NODE_MODULES}/${pkgName}`)
+					._resolved,
 				fileName: pkgName
 			});
 		}
@@ -94,27 +115,42 @@ async function moveRootModules() {
 	for (const pkgName in devDependencies) {
 		if (pkgName.startsWith(PREFIX_NB)) {
 			nbDevDependciesPath.push({
+				url: getPackageJSON(`${getRootDir()}/${NODE_MODULES}/${pkgName}`)
+					._resolved,
 				fileName: pkgName
 			});
 		}
 	}
 	for (let i = 0; i < nbDependciesPath.length; i++) {
-		const { fileName } = nbDependciesPath[i];
-
-		await moveModule(getModulesRootDir(), fileName);
+		const { fileName, url } = nbDependciesPath[i];
+		if (projectMode === 'move') {
+			await moveModule(getModulesRootDir(), fileName);
+		} else {
+			await downloadModule(getModulesRootDir(), url, fileName);
+		}
 	}
 	for (let i = 0; i < nbDevDependciesPath.length; i++) {
-		const { fileName } = nbDevDependciesPath[i];
-		await moveModule(getModulesDEVRootDir(), fileName);
+		const { fileName, url } = nbDevDependciesPath[i];
+		if (projectMode === 'move') {
+			await moveModule(getModulesDEVRootDir(), fileName);
+		} else {
+			await downloadModule(getModulesDEVRootDir(), url, fileName);
+		}
 	}
 }
 
-function getDependciesList(allModuleNames, data, type) {
+function getDependciesList(
+	allModuleNames: string[],
+	data: Record<string, unknown>,
+	type: TNbDependciesType
+) {
 	const list: INbDependciesFileNameAndType[] = [];
 	for (const pkgName in data) {
 		if (pkgName.startsWith(PREFIX_NB) && !allModuleNames.includes(pkgName)) {
+			const path = `${getRootDir()}/${NODE_MODULES}/${pkgName}`;
 			list.push({
 				fileName: pkgName,
+				url: getPackageJSON(path)._resolved,
 				type: type
 			});
 		}
@@ -124,7 +160,7 @@ function getDependciesList(allModuleNames, data, type) {
 /**
  * 移动 依赖模块 package.json下的nb模块到 center-modules/[dependencies | devDependencies ]下
  */
-async function moveDependciesModules() {
+async function moveDependciesModules(projectMode: TProjectMode) {
 	const allModuleNames = getAllModuleName();
 
 	let queue: INbDependciesFileNameAndType[] = [];
@@ -143,11 +179,32 @@ async function moveDependciesModules() {
 	}
 	while (queue.length > 0) {
 		// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-		const { fileName, type } = queue.pop()!;
-		const { dependencies = {}, devDependencies = {} } = await moveModule(
-			type === DEPENDENCIES ? getModulesRootDir() : getModulesDEVRootDir(),
-			fileName
-		);
+		const { fileName, type, url } = queue.pop()!;
+		let dependencies = {};
+		let devDependencies = {};
+		if (projectMode === 'move') {
+			const {
+				dependencies: _dependencies = {},
+				devDependencies: _devDependencies = {}
+			} = await moveModule(
+				type === DEPENDENCIES ? getModulesRootDir() : getModulesDEVRootDir(),
+				fileName
+			);
+			dependencies = _dependencies;
+			devDependencies = _devDependencies;
+		} else {
+			const {
+				dependencies: _dependencies = {},
+				devDependencies: _devDependencies = {}
+			} = await downloadModule(
+				type === DEPENDENCIES ? getModulesRootDir() : getModulesDEVRootDir(),
+				url,
+				fileName
+			);
+			dependencies = _dependencies;
+			devDependencies = _devDependencies;
+		}
+
 		queue = [
 			...queue,
 			...getDependciesList(allModuleNames, dependencies, DEPENDENCIES),
@@ -197,7 +254,7 @@ function handleWriteProxyHook() {
 		);
 	writeFileSync(path, str);
 }
-function handleWritePackage(isCover = false) {
+function handleWritePackage(excludeFiles: string[], isCover = false) {
 	const pkgJSON = getPackageJSON(getRootDir());
 	const {
 		dependencies: pkgDependencies,
@@ -208,11 +265,13 @@ function handleWritePackage(isCover = false) {
 	const allModuleInfo = getAllModuleInfo();
 	allModuleInfo.forEach((moduleInfo) => {
 		const { fileName, relativeUrl } = moduleInfo;
-		const { dependencies = {}, devDependencies = {} } = getPackageJSON(
-			`${getRootDir()}/${relativeUrl}/${fileName}`
-		);
-		_dependencies = merge(_dependencies, dependencies);
-		_devDependencies = merge(_devDependencies, devDependencies);
+		if (!excludeFiles.includes(fileName)) {
+			const { dependencies = {}, devDependencies = {} } = getPackageJSON(
+				`${getRootDir()}/${relativeUrl}/${fileName}`
+			);
+			_dependencies = merge(_dependencies, dependencies);
+			_devDependencies = merge(_devDependencies, devDependencies);
+		}
 	});
 	_dependencies = merge(_dependencies, pkgDependencies);
 	_devDependencies = merge(_devDependencies, pkgDdevDependencies);
@@ -269,23 +328,25 @@ function handleWriteTsconfig(isCover = false) {
 	}
 }
 
-function handleWriteFile(pkgCover = false, projectType: TProjectType) {
+function handleWriteFile(
+	excludeFiles: string[],
+	pkgCover = false,
+	projectType: TProjectType
+) {
 	handleWriteWebpack();
 	handleWriteProxyHook();
 	if (projectType === 'ts') {
 		handleWriteTsconfig(true);
 	}
-	handleWritePackage(pkgCover);
+	handleWritePackage(excludeFiles, pkgCover);
 }
 
-function init() {
-	logTips();
-}
-
-async function run() {
-	init();
-	const { pkgCover, projectType } = await askQuetions();
-
+async function run(
+	tips = 'nb batch script',
+	excludeMergeFiles = DEFAULT_EXCLUDE_MERGE_FILES
+) {
+	logTips(tips);
+	const { pkgCover, projectType, projectMode } = await askQuetions();
 	// promise reject 捕获
 	process.on('unhandledRejection', async (res, p) => {
 		console.log(red.bold('res:', res, 'p:', p));
@@ -297,9 +358,8 @@ async function run() {
 		await remove(getModulesRootDir());
 		await remove(getModulesDEVRootDir());
 		await arrangeRootPackageJson();
-		await moveRootModules();
-		await moveDependciesModules();
-		handleWriteFile(pkgCover, projectType);
+		await handleModules(projectMode);
+		handleWriteFile(excludeMergeFiles, pkgCover, projectType);
 	});
 }
 export default run;
