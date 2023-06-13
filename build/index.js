@@ -1,11 +1,13 @@
 (function (global, factory) {
 	typeof exports === 'object' && typeof module !== 'undefined' ? module.exports = factory(require('shelljs'), require('chalk'), require('fs-extra'), require('axios'), require('compressing'), require('lodash/merge'), require('crypto'), require('ora'), require('path'), require('figlet'), require('inquirer')) :
 	typeof define === 'function' && define.amd ? define(['shelljs', 'chalk', 'fs-extra', 'axios', 'compressing', 'lodash/merge', 'crypto', 'ora', 'path', 'figlet', 'inquirer'], factory) :
-	(global = typeof globalThis !== 'undefined' ? globalThis : global || self, (global.index = global.index || {}, global.index.js = factory(null, global.chalk, global.fsExtra, null, null, null, null, global.ora, global.path, global.figlet, global.inquirer)));
+	(global = typeof globalThis !== 'undefined' ? globalThis : global || self, (global.index = global.index || {}, global.index.js = factory(global.shelljs, global.chalk, global.fsExtra, global.axios, global.compressing, global.merge, global.crypto, global.ora, global.path, global.figlet, global.inquirer)));
 })(this, (function (shelljs, chalk, fsExtra, axios, compressing, merge, crypto, ora, path, figlet, inquirer) { 'use strict';
 
 	const DEPENDENCIES = 'dependencies';
 	const DEV_DEPENDENCIES = 'devDependencies';
+	const NODE_MODULES = 'node_modules';
+	const PREFIX_NB = 'nb-';
 	const DEFAULT_EXCLUDE_MERGE_FILES = [
 	    'nb-draggable',
 	    'nb-math',
@@ -16,6 +18,9 @@
 	    'nb-http-proxy'
 	];
 
+	function random() {
+	    return crypto.randomUUID();
+	}
 	/**
 	 *
 	 * @returns 项目更目录 全路径
@@ -47,6 +52,28 @@
 	    }
 	    return path;
 	}
+	// 获取所有模块名
+	function getAllModuleName() {
+	    return [
+	        ...fsExtra.readdirSync(getModulesRootDir()),
+	        ...fsExtra.readdirSync(getModulesDEVRootDir())
+	    ];
+	}
+	// 获取所有模块信息
+	function getAllModuleInfo() {
+	    return [
+	        ...fsExtra.readdirSync(getModulesRootDir()).map((fileName) => ({
+	            fileName,
+	            relativeUrl: `src/center-modules/${DEPENDENCIES}`,
+	            type: DEPENDENCIES
+	        })),
+	        ...fsExtra.readdirSync(getModulesDEVRootDir()).map((fileName) => ({
+	            fileName,
+	            relativeUrl: `src/center-modules/${DEV_DEPENDENCIES}`,
+	            type: DEV_DEPENDENCIES
+	        }))
+	    ];
+	}
 	const dfsCreateDir = (targetDir) => {
 	    if (fsExtra.existsSync(targetDir)) {
 	        return true;
@@ -58,6 +85,35 @@
 	        }
 	    }
 	};
+	const _dfsCreateDir = dfsCreateDir;
+	function setWebpackAlias(dirList, type) {
+	    let str = '';
+	    dirList.forEach((dirName) => {
+	        str += `
+            '${dirName}': utils.resolve('src/center-modules/${type}/${dirName}'),`;
+	    });
+	    return str;
+	}
+	function handleNodeModulesReplace(path) {
+	    let webpackStr = fsExtra.readFileSync(path, { encoding: 'utf-8' }).toString();
+	    const webpackList = webpackStr.split(`${NODE_MODULES}/`);
+	    const allModuleInfo = getAllModuleInfo();
+	    for (let i = 0; i < webpackList.length; i++) {
+	        let flag = false;
+	        for (let j = 0; j < allModuleInfo.length; j++) {
+	            if (webpackList[i].includes(allModuleInfo[j].fileName) &&
+	                !webpackList[i].includes(allModuleInfo[j].fileName + '-')) {
+	                webpackList[i] = `${allModuleInfo[j].relativeUrl}/${webpackList[i]}`;
+	                flag = true;
+	            }
+	        }
+	        if (!flag && i !== 0) {
+	            webpackList[i] = `${NODE_MODULES}/${webpackList[i]}`;
+	        }
+	    }
+	    webpackStr = webpackList.join('');
+	    return webpackStr;
+	}
 	/**
 	 * 终端标题打印
 	 */
@@ -133,6 +189,25 @@
 	    console.log(`批处理脚本总耗时：${chalk.yellow.bold(endTime - startTime)} 毫秒`);
 	}
 
+	async function downloadModule(targetDir, path, fileName) {
+	    const fileBuffer = await axios.get(path, {
+	        responseType: 'arraybuffer'
+	    });
+	    const newTargetDir = `${targetDir}/${random()}`;
+	    _dfsCreateDir(targetDir);
+	    await compressing.tgz.uncompress(fileBuffer.data, newTargetDir);
+	    console.log(chalk.blue(`正在下载nb包: ${fileName} 至 ${targetDir}文件夹下`));
+	    await fsExtra.move(`${newTargetDir}/package`, `${targetDir}/${fileName}`);
+	    await fsExtra.remove(newTargetDir);
+	    return getPackageJSON(`${targetDir}/${fileName}`);
+	}
+	async function moveModule(targetDir, fileName) {
+	    const targetPath = `${targetDir}/${fileName}`;
+	    _dfsCreateDir(targetDir);
+	    console.log(chalk.blue(`正在移动nb包: ${NODE_MODULES}/${fileName} 至 ${targetDir}文件夹下`));
+	    shelljs.mv(`${getRootDir()}/${NODE_MODULES}/${fileName}/`, targetPath + '/');
+	    return getPackageJSON(targetPath);
+	}
 	/**
 	 * 清理 根目录 package.json
 	 */
@@ -148,9 +223,216 @@
 	    await fsExtra.writeFile(`${getRootDir()}/package.json`, JSON.stringify(packageJSON, null, 2));
 	    console.log(chalk.red.bold('package.json整理完成'));
 	}
+	/**
+	 * 处理模块
+	 */
+	async function handleModules(projectMode) {
+	    await moveRootModules(projectMode);
+	    await moveDependciesModules(projectMode);
+	}
+	/**
+	 * 移动根目录package.json下的nb模块到 center-modules/[dependencies | devDependencies ]下
+	 */
+	async function moveRootModules(projectMode) {
+	    const rootPackageJSON = getPackageJSON(`${getRootDir()}`);
+	    const { dependencies = {}, devDependencies = {} } = rootPackageJSON;
+	    const nbDependciesPath = [];
+	    const nbDevDependciesPath = [];
+	    for (const pkgName in dependencies) {
+	        if (pkgName.startsWith(PREFIX_NB)) {
+	            nbDependciesPath.push({
+	                url: getPackageJSON(`${getRootDir()}/${NODE_MODULES}/${pkgName}`)
+	                    ._resolved,
+	                fileName: pkgName
+	            });
+	        }
+	    }
+	    for (const pkgName in devDependencies) {
+	        if (pkgName.startsWith(PREFIX_NB)) {
+	            nbDevDependciesPath.push({
+	                url: getPackageJSON(`${getRootDir()}/${NODE_MODULES}/${pkgName}`)
+	                    ._resolved,
+	                fileName: pkgName
+	            });
+	        }
+	    }
+	    for (let i = 0; i < nbDependciesPath.length; i++) {
+	        const { fileName, url } = nbDependciesPath[i];
+	        if (projectMode === 'move') {
+	            await moveModule(getModulesRootDir(), fileName);
+	        }
+	        else {
+	            await downloadModule(getModulesRootDir(), url, fileName);
+	        }
+	    }
+	    for (let i = 0; i < nbDevDependciesPath.length; i++) {
+	        const { fileName, url } = nbDevDependciesPath[i];
+	        if (projectMode === 'move') {
+	            await moveModule(getModulesDEVRootDir(), fileName);
+	        }
+	        else {
+	            await downloadModule(getModulesDEVRootDir(), url, fileName);
+	        }
+	    }
+	}
+	function getDependciesList(allModuleNames, data, type) {
+	    const list = [];
+	    for (const pkgName in data) {
+	        if (pkgName.startsWith(PREFIX_NB) && !allModuleNames.includes(pkgName)) {
+	            const path = `${getRootDir()}/${NODE_MODULES}/${pkgName}`;
+	            list.push({
+	                fileName: pkgName,
+	                url: getPackageJSON(path)._resolved,
+	                type: type
+	            });
+	        }
+	    }
+	    return list;
+	}
+	/**
+	 * 移动 依赖模块 package.json下的nb模块到 center-modules/[dependencies | devDependencies ]下
+	 */
+	async function moveDependciesModules(projectMode) {
+	    const allModuleNames = getAllModuleName();
+	    let queue = [];
+	    const modulesRootDir = getModulesRootDir();
+	    const modulesDirs = fsExtra.readdirSync(modulesRootDir);
+	    for (let i = 0; i < modulesDirs.length; i++) {
+	        const modulesDir = modulesDirs[i];
+	        const { dependencies = {}, devDependencies = {} } = getPackageJSON(`${modulesRootDir}/${modulesDir}`);
+	        queue = [
+	            ...queue,
+	            ...getDependciesList(allModuleNames, dependencies, DEPENDENCIES),
+	            ...getDependciesList(allModuleNames, devDependencies, DEV_DEPENDENCIES)
+	        ];
+	    }
+	    while (queue.length > 0) {
+	        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+	        const { fileName, type, url } = queue.pop();
+	        let dependencies = {};
+	        let devDependencies = {};
+	        if (projectMode === 'move') {
+	            const { dependencies: _dependencies = {}, devDependencies: _devDependencies = {} } = await moveModule(type === DEPENDENCIES ? getModulesRootDir() : getModulesDEVRootDir(), fileName);
+	            dependencies = _dependencies;
+	            devDependencies = _devDependencies;
+	        }
+	        else {
+	            const { dependencies: _dependencies = {}, devDependencies: _devDependencies = {} } = await downloadModule(type === DEPENDENCIES ? getModulesRootDir() : getModulesDEVRootDir(), url, fileName);
+	            dependencies = _dependencies;
+	            devDependencies = _devDependencies;
+	        }
+	        queue = [
+	            ...queue,
+	            ...getDependciesList(allModuleNames, dependencies, DEPENDENCIES),
+	            ...getDependciesList(allModuleNames, devDependencies, DEV_DEPENDENCIES)
+	        ];
+	    }
+	}
+	function handleWriteWebpack() {
+	    let webpackStr = handleNodeModulesReplace(`${getRootDir()}/build/webpack.js`);
+	    if (webpackStr.includes('merge(require("./webpack-alias")'))
+	        return;
+	    const webpackAlias = `{
+    app: {
+      configureWebpack: {
+        resolve: {
+          alias: {
+            ${setWebpackAlias(fsExtra.readdirSync(getModulesRootDir()), DEPENDENCIES)}${setWebpackAlias(fsExtra.readdirSync(getModulesDEVRootDir()), DEV_DEPENDENCIES)}
+          }
+        }
+      }
+    }
+  }`;
+	    // 重写webpack
+	    fsExtra.writeFileSync(`${getRootDir()}/build/webpack-alias.js`, `const utils = require('./utils')\r\nmodule.exports = ${webpackAlias}`);
+	    webpackStr = webpackStr.replace('module.exports = merge(', 'module.exports = merge(require("./webpack-alias"),');
+	    fsExtra.writeFileSync(`${getRootDir()}/build/webpack.js`, webpackStr);
+	}
+	function handleWriteProxyHook() {
+	    const path = `${getRootDir()}/build/proxy-hook.js`;
+	    const str = fsExtra.readFileSync(path, { encoding: 'utf-8' })
+	        .toString()
+	        .replace(/nb-http-proxy/g, `../src/center-modules/devDependencies/nb-http-proxy`);
+	    fsExtra.writeFileSync(path, str);
+	}
+	function handleWritePackage(excludeFiles, isCover = false) {
+	    const pkgJSON = getPackageJSON(getRootDir());
+	    const { dependencies: pkgDependencies, devDependencies: pkgDdevDependencies } = pkgJSON;
+	    let _dependencies = {};
+	    let _devDependencies = {};
+	    const allModuleInfo = getAllModuleInfo();
+	    allModuleInfo.forEach((moduleInfo) => {
+	        const { fileName, relativeUrl } = moduleInfo;
+	        if (!excludeFiles.includes(fileName)) {
+	            const { dependencies = {}, devDependencies = {} } = getPackageJSON(`${getRootDir()}/${relativeUrl}/${fileName}`);
+	            _dependencies = merge(_dependencies, dependencies);
+	            _devDependencies = merge(_devDependencies, devDependencies);
+	        }
+	    });
+	    _dependencies = merge(_dependencies, pkgDependencies);
+	    _devDependencies = merge(_devDependencies, pkgDdevDependencies);
+	    for (const pkgName in _dependencies) {
+	        if (pkgName.startsWith(PREFIX_NB)) {
+	            delete _dependencies[pkgName];
+	        }
+	    }
+	    for (const pkgName in _devDependencies) {
+	        if (pkgName.startsWith(PREFIX_NB)) {
+	            delete _devDependencies[pkgName];
+	        }
+	    }
+	    for (const pkgName in _dependencies) {
+	        for (const devPkgName in _devDependencies) {
+	            if (pkgName === devPkgName) {
+	                delete _devDependencies[devPkgName];
+	            }
+	        }
+	    }
+	    pkgJSON.dependencies = _dependencies;
+	    pkgJSON.devDependencies = _devDependencies;
+	    const pkgJSONStr = JSON.stringify(pkgJSON, null, 2);
+	    if (isCover) {
+	        fsExtra.writeFileSync(`${getRootDir()}/package.json`, pkgJSONStr);
+	    }
+	    else {
+	        fsExtra.writeFileSync(`${getRootDir()}/package.${random()}.json`, pkgJSONStr);
+	    }
+	}
+	function handleWriteTsconfig(isCover = false) {
+	    const path = `${getRootDir()}/tsconfig.json`;
+	    if (!fsExtra.existsSync(path)) {
+	        throw new Error(chalk.red(`路径:${path} 不存在`));
+	    }
+	    const tsconfig = JSON.parse(handleNodeModulesReplace(path));
+	    if (!tsconfig.compilerOptions.paths) {
+	        tsconfig.compilerOptions.paths = {};
+	    }
+	    const allModuleInfo = getAllModuleInfo();
+	    allModuleInfo.forEach((moduleInfo) => {
+	        const { fileName, relativeUrl } = moduleInfo;
+	        if (!tsconfig.compilerOptions.paths[fileName]) {
+	            tsconfig.compilerOptions.paths[fileName] = [`${relativeUrl}/${fileName}`];
+	        }
+	    });
+	    const tsconfigStr = JSON.stringify(tsconfig, null, 2);
+	    if (isCover) {
+	        fsExtra.writeFileSync(path, tsconfigStr);
+	    }
+	    else {
+	        fsExtra.writeFileSync(`${getRootDir()}/tsconfig.${random()}.json`, tsconfigStr);
+	    }
+	}
+	function handleWriteFile(excludeFiles, pkgCover = false, projectType) {
+	    handleWriteWebpack();
+	    handleWriteProxyHook();
+	    if (projectType === 'ts') {
+	        handleWriteTsconfig(true);
+	    }
+	    handleWritePackage(excludeFiles, pkgCover);
+	}
 	async function run(tips = 'nb batch script', excludeMergeFiles = DEFAULT_EXCLUDE_MERGE_FILES) {
 	    logTips(tips);
-	    await askQuetions();
+	    const { pkgCover, projectType, projectMode } = await askQuetions();
 	    // promise reject 捕获
 	    process.on('unhandledRejection', async (res, p) => {
 	        console.log(chalk.red.bold('res:', res, 'p:', p));
@@ -161,7 +443,8 @@
 	        await fsExtra.remove(getModulesRootDir());
 	        await fsExtra.remove(getModulesDEVRootDir());
 	        await arrangeRootPackageJson();
-	        return;
+	        await handleModules(projectMode);
+	        handleWriteFile(excludeMergeFiles, pkgCover, projectType);
 	    });
 	}
 
